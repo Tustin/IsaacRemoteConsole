@@ -1,5 +1,5 @@
 # IsaacRemoteConsole
-Remotely call command consoles in Afterbirth+.
+Remotely call console commands in Afterbirth+.
 
 ## How to use:
 1. Clone repo or download as zip

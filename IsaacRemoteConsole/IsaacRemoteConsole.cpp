@@ -6,16 +6,14 @@
 using namespace std;
 extern "C" { int _afxForceUSRDLL; }
 
-DWORD freeMem = 0x0E001932; //spot in memory that is rw where we can throw the command buffer. shouldnt cause issues.
-DWORD processCommandAddress = 0x013CE6A0; //function address that parses the command. function prototype from IDA: void __thiscall ProcessCommand(char *this)
-DWORD unkPointer = 0x017C9C98; //some pointer of a pointer that is read for the command struct
+DWORD processCommandAddress = 0x010AE6A0; //function address that parses the command. function prototype from IDA: void __thiscall ProcessCommand(char *this)
+DWORD unkPointer = 0x014A9C98; //some pointer of a pointer that is read for the command struct
 DWORD unkPointerOffset = 0x0A0B0; //the offset of the pointer at unkPointer that points to the command structure
 DWORD commandBufferOffset = 0x0C; //the offset from the commandStructAddress to the buffer for the command
 
 //runtime addresses are stored here
 DWORD unkPointerAddress;
 DWORD commandStructAddress;
-DWORD commandBuffer;
 HANDLE isaacProcess = GetCurrentProcess();
 
 //simulates a __thiscall method by pushing the commandstructaddress into ecx
@@ -67,6 +65,8 @@ struct ConsoleCommand {
 	byte bufferTypeFlag;
 
 };
+ConsoleCommand commandStructure;
+
 DWORD GetPointerToCommandStruct() {
 	unkPointerAddress = (*(DWORD*)unkPointer);
 	return unkPointerAddress + unkPointerOffset;
@@ -81,20 +81,25 @@ BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			switch (wParam)
 			{
 			case IDOK:
-				char cmd[64];
-				GetDlgItemTextA(hDlg, IDC_EDIT1, cmd, sizeof(cmd));
+				char cmd[255];
 				int commandLen = strlen(cmd);
-				WriteProcessMemory(isaacProcess, (LPVOID)freeMem, cmd, commandLen + 1, 0);
-				//dont judge me. this is just freeMem as little endian lol
-				char mem[] = { 0x32, 0x19, 0x00, 0x0E };
-				//write the address to our command buffer into the command struct
-				WriteProcessMemory(isaacProcess, (LPVOID)commandBuffer, mem, 4, 0);
-				//set length for the command entered
-				DWORD commandBufferLen = commandBuffer + 0x10;
-				DWORD commandBufferFlag = commandStructAddress + 0x20;
-				*(BYTE*)commandBufferLen = commandLen;
-				*(BYTE*)commandBufferFlag = BufferType::Pointer;
+
+				GetDlgItemTextA(hDlg, IDC_EDIT1, cmd, commandLen);
+
+				//create some memory for our command buffer
+				LPVOID commandBufferAddress = VirtualAllocEx(isaacProcess, NULL, commandLen + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+				WriteProcessMemory(isaacProcess, commandBufferAddress, cmd, commandLen + 1, 0);
+
+				commandStructure.pointerToCommandBuffer = (DWORD)commandBufferAddress;
+				commandStructure.bufferLength = commandLen;
+				commandStructure.bufferTypeFlag = BufferType::Pointer;
+				
+				//write our command structure into the command structure in game memory
+				WriteProcessMemory(isaacProcess, (LPVOID)commandStructAddress, &commandStructure, sizeof(commandStructure), 0);
 				ExecuteCommand();
+				//free our command buffer memory
+				VirtualFreeEx(isaacProcess, commandBufferAddress, commandLen + 1, MEM_FREE);
 			break;
 
 			}
@@ -102,11 +107,11 @@ BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		break;
 	case WM_CLOSE:
 		DestroyWindow(hDlg);
-		ExitProcess(0);
+		ExitThread(0);
 		break;
 	case WM_DESTROY:
 		PostQuitMessage(0);
-		ExitProcess(0);
+		ExitThread(0);
 		break;
 	default:
 		return DefWindowProc(hDlg, uMsg, wParam, lParam);
@@ -114,12 +119,16 @@ BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	return 0;
 }
 
-DWORD WINAPI mainWindow(HMODULE hMod) {
+DWORD WINAPI MainWindow(HMODULE hMod) {
 	commandStructAddress = GetPointerToCommandStruct();
-	commandBuffer = commandStructAddress + 0x0C;
-	//char out[64];
-	//sprintf_s(out, "%02X", commandBuffer);
-	//MessageBoxA(0, out, "", 0);
+	//Load the structure from memory into our own defined struct
+	if (!ReadProcessMemory(isaacProcess, (LPVOID)commandStructAddress, &commandStructure, sizeof(commandStructure), 0)) {
+		char out[64];
+		sprintf_s(out, "Error loading structure from address %02X", commandStructAddress);
+		MessageBoxA(NULL, out, "Error", MB_OK);
+		ExitThread(0);
+	}
+
 	DialogBox(hMod, MAKEINTRESOURCE(IDD_DIALOG1), NULL, (DLGPROC)EventHandler);
 	ExitThread(0);
 	return 0;
@@ -127,7 +136,7 @@ DWORD WINAPI mainWindow(HMODULE hMod) {
 BOOL APIENTRY WINAPI DllMain(HINSTANCE hModule, DWORD dwAttached, LPVOID lpvReserved)
 {
 	if (dwAttached == DLL_PROCESS_ATTACH) {
-		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)mainWindow, hModule, 0, NULL);
+		CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)MainWindow, hModule, 0, NULL);
 	}
 	return TRUE;
 }

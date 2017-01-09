@@ -3,17 +3,23 @@
 #include "Resource.h"
 
 #include "enums.h"
+#include "Scanner.h"
+
 using namespace std;
 extern "C" { int _afxForceUSRDLL; }
 
-DWORD processCommandAddress = 0x010AE6A0; //function address that parses the command. function prototype from IDA: void __thiscall ProcessCommand(char *this)
-DWORD unkPointer = 0x014A9C98; //some pointer of a pointer that is read for the command struct
-DWORD unkPointerOffset = 0x0A0B0; //the offset of the pointer at unkPointer that points to the command structure
-DWORD commandBufferOffset = 0x0C; //the offset from the commandStructAddress to the buffer for the command
+BYTE processCommandAddressSignature[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x6A, 0xFF, 0x68, 0x67, 0x95, 0x99, 0x99, 0x99, 0x99, 0x00, 0x00, 0x00, 0x00, 0x50, 0x81, 0xEC, 0xE8, 0x01, 0x00, 0x00, 0xA1, 0x40, 0x67, 0x99, 0x99, 0x33, 0xC4, 0x89, 0x84, 0x24, 0xE0, 0x01, 0x00, 0x00 };
+
+BYTE commandStructurePointerSignature[] = { 0x00, 0x00, 0x00, 0x00, 0x20, 0x99, 0x99, 0x99, 0x00, 0x00, 0x80, 0x3F }; //this one isnt as accurate as the function sig above but its more difficult considering its just a pointer address
+
+DWORD processCommandAddress; //function address that parses the command. function prototype from IDA: void __thiscall ProcessCommand(char *this)
+DWORD commandStructurePointerOfPointerAddress; //pointer of a pointer that leads to the command structure address in memory. (trust me, i know how dumb this variable name is)
+DWORD commandStructurePointerOffset = 0x0A0B0; //the offset of the pointer at commandStructureAddress that points to the command structure
 
 //runtime addresses are stored here
-DWORD unkPointerAddress;
-DWORD commandStructAddress;
+DWORD commandStructurePointerAddress;
+DWORD commandStructureAddress;
+
 HANDLE isaacProcess = GetCurrentProcess();
 
 //simulates a __thiscall method by pushing the commandstructaddress into ecx
@@ -26,9 +32,9 @@ void ExecuteCommand() {
 		push edx
 		mov eax, 0x0D
 		mov edx, 0x0D
-		mov ecx, [commandStructAddress]
-		mov esi, [commandStructAddress]
-		mov edi, [unkPointerAddress]
+		mov ecx, [commandStructureAddress]
+		mov esi, [commandStructureAddress]
+		mov edi, [commandStructurePointerAddress]
 		call processCommandAddress
 		pop     edi
 		pop     esi
@@ -38,6 +44,17 @@ void ExecuteCommand() {
 		retn
 	}
 
+}
+
+void executetest(DWORD commandPointer, int commandLen) {
+	__asm {
+		push esi
+		push edi
+		mov esi, [commandPointer]
+		mov edi, commandLen
+		call processCommandAddress
+
+	}
 }
 
 struct ConsoleCommand {
@@ -64,12 +81,11 @@ struct ConsoleCommand {
 	//how the engine parses the command (see BufferType in enums.h)
 	byte bufferTypeFlag;
 
-};
-ConsoleCommand commandStructure;
+} commandStructure;
 
 DWORD GetPointerToCommandStruct() {
-	unkPointerAddress = (*(DWORD*)unkPointer);
-	return unkPointerAddress + unkPointerOffset;
+	commandStructurePointerAddress = (*(DWORD*)commandStructurePointerOfPointerAddress);
+	return commandStructurePointerAddress + commandStructurePointerOffset;
 }
 
 BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -94,13 +110,13 @@ BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 				commandStructure.pointerToCommandBuffer = (DWORD)commandBufferAddress;
 				commandStructure.bufferLength = commandLen;
 				commandStructure.bufferTypeFlag = BufferType::Pointer;
-				
+
 				//write our command structure into the command structure in game memory
-				WriteProcessMemory(isaacProcess, (LPVOID)commandStructAddress, &commandStructure, sizeof(commandStructure), 0);
+				WriteProcessMemory(isaacProcess, (LPVOID)commandStructureAddress, &commandStructure, sizeof(commandStructure), 0);
 				ExecuteCommand();
 				//free our command buffer memory
 				VirtualFreeEx(isaacProcess, commandBufferAddress, commandLen + 1, MEM_FREE);
-			break;
+				break;
 
 			}
 		}
@@ -120,11 +136,26 @@ BOOL CALLBACK EventHandler(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 }
 
 DWORD WINAPI MainWindow(HMODULE hMod) {
-	commandStructAddress = GetPointerToCommandStruct();
+	HMODULE isaacBase = GetModuleHandle(NULL);
+
+	processCommandAddress = FindAddress(processCommandAddressSignature, sizeof(processCommandAddressSignature), (DWORD)isaacBase, 0xFFFFFF);
+	if (processCommandAddress == 00) {
+		MessageBoxA(NULL, "Unable to find processCommandAddress using signature scan", "Error", MB_OK);
+		ExitThread(0);
+	}
+	commandStructurePointerOfPointerAddress = FindAddress(commandStructurePointerSignature, sizeof(commandStructurePointerSignature), (DWORD)isaacBase, 0xFFFFFF);
+	if (commandStructurePointerOfPointerAddress == 00) {
+		MessageBoxA(NULL, "Unable to find commandStructureAddress using signature scan", "Error", MB_OK);
+		ExitThread(0);
+	}
+	//add 4 because the signature scanner starts scanning at the bytes before the pointer we need
+	commandStructurePointerOfPointerAddress += 0x4;
+
+	commandStructureAddress = GetPointerToCommandStruct();
 	//Load the structure from memory into our own defined struct
-	if (!ReadProcessMemory(isaacProcess, (LPVOID)commandStructAddress, &commandStructure, sizeof(commandStructure), 0)) {
+	if (!ReadProcessMemory(isaacProcess, (LPVOID)commandStructureAddress, &commandStructure, sizeof(commandStructure), 0)) {
 		char out[64];
-		sprintf_s(out, "Error loading structure from address %02X", commandStructAddress);
+		sprintf_s(out, "Error loading structure from commandStructAddress %02X", commandStructureAddress);
 		MessageBoxA(NULL, out, "Error", MB_OK);
 		ExitThread(0);
 	}
